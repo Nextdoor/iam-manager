@@ -19,9 +19,7 @@ before_install: skip
 
 install:
   # install kube builder so BDD test cases can work
-  - wget https://github.com/kubernetes-sigs/kubebuilder/releases/download/v2.2.0/kubebuilder_2.2.0_linux_amd64.tar.gz
-  - tar -zxvf  kubebuilder_2.2.0_linux_amd64.tar.gz
-  - sudo mv kubebuilder_2.2.0_linux_amd64 /usr/local/kubebuilder
+  - make kubebuilder
 
 jobs:
   include:
@@ -37,6 +35,9 @@ jobs:
       if: type IN (push)
       script:
         - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+        # this should overwrite "latest" image with the latest version one
+        - make docker-build
+        - make docker-push
         - if [ $TRAVIS_EVENT_TYPE = push ]; then export IMG=keikoproj/iam-manager:$TRAVIS_BRANCH; fi
         - make docker-build
         - make docker-push
