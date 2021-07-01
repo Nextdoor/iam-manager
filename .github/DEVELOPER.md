@@ -7,6 +7,13 @@
 * Your favorite IDE
 * kubebuilder
 
+### Install Kubebuilder
+
+Kubebuilder is a requirement for the testsuite.. you can install it quickly
+on your own or with our make target:
+
+    $ make kubebuilder
+
 ### Quickstart
 
 First, go and fork the Github repo to your own personal project. Once that's
@@ -16,16 +23,11 @@ add in your fork'ed repo as a new target for doing git pushes.
     $ go clean -modcache
     $ go get -v github.com/keikoproj/iam-manager
     $ cd "$(go env GOPATH)/src/github.com/keikoproj/iam-manager"
+    $ AWS_PROFILE=junk  # to make sure any live creds you have do not interfere with the aws tests
     $ make test
     $ go mod vendor
     $ git remote add myfork <your fork>
 
-### Install Kubebuilder
-
-Kubebuilder is a requirement for the testsuite.. you can install it quickly
-on your own or with our make target:
-
-    $ make kubebuilder
 
 ### Build project
 

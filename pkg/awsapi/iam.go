@@ -48,12 +48,25 @@ type IAMRoleResponse struct {
 	RoleID  string
 }
 
+func NewIAMRoleResponseFromGetRole(output iam.GetRoleOutput) *IAMRoleResponse {
+	return &IAMRoleResponse{
+		RoleARN: aws.StringValue(output.Role.Arn),
+		RoleID:  aws.StringValue(output.Role.RoleId),
+	}
+}
+
+func NewIAMRoleResponseFromCreateRole(output iam.CreateRoleOutput) *IAMRoleResponse {
+	return &IAMRoleResponse{
+		RoleARN: aws.StringValue(output.Role.Arn),
+		RoleID:  aws.StringValue(output.Role.RoleId),
+	}
+}
+
 type IAM struct {
 	Client iamiface.IAMAPI
 }
 
 func NewIAM(region string) *IAM {
-
 	sess, err := session.NewSession(&aws.Config{Region: aws.String(region)})
 	if err != nil {
 		panic(err)
@@ -63,53 +76,15 @@ func NewIAM(region string) *IAM {
 	}
 }
 
-// CreateRole creates/updates the role
-func (i *IAM) CreateRole(ctx context.Context, req IAMRoleRequest) (*IAMRoleResponse, error) {
-	log := log.Logger(ctx, "awsapi", "iam", "CreateRole")
+func (i *IAM) EnsureRole(ctx context.Context, req IAMRoleRequest) (*IAMRoleResponse, error) {
+	log := log.Logger(ctx, "awsapi", "iam", "EnsureRole")
 	log = log.WithValues("roleName", req.Name)
-	log.V(1).Info("Initiating api call")
-	input := &iam.CreateRoleInput{
-		AssumeRolePolicyDocument: aws.String(req.TrustPolicy),
-		RoleName:                 aws.String(req.Name),
-		Description:              aws.String(req.Description),
-		MaxSessionDuration:       aws.Int64(req.SessionDuration),
-		PermissionsBoundary:      aws.String(req.ManagedPermissionBoundaryPolicy),
-	}
 
-	if err := input.Validate(); err != nil {
-		log.Error(err, "input validation failed")
-		return nil, err
-	}
-
-	roleAlreadyExists := false
-	iResp, err := i.Client.CreateRole(input)
+	// Get the role, or create it.
+	log.V(1).Info("Verifying that IAM Role exists")
+	role, err := i.GetOrCreateRole(ctx, req)
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			switch aerr.Code() {
-			// Update the role to the latest spec if it is existed already
-			case iam.ErrCodeEntityAlreadyExistsException:
-				roleAlreadyExists = true
-				log.Info(iam.ErrCodeEntityAlreadyExistsException)
-			case iam.ErrCodeLimitExceededException:
-				log.Error(err, iam.ErrCodeLimitExceededException)
-			case iam.ErrCodeNoSuchEntityException:
-				log.Error(err, iam.ErrCodeNoSuchEntityException)
-			case iam.ErrCodeServiceFailureException:
-				log.Error(err, iam.ErrCodeServiceFailureException)
-			default:
-				log.Error(err, aerr.Error())
-			}
-		}
-		if !roleAlreadyExists {
-			return nil, err
-		}
-	}
-
-	resp := &IAMRoleResponse{}
-
-	if !roleAlreadyExists {
-		resp.RoleARN = aws.StringValue(iResp.Role.Arn)
-		resp.RoleID = aws.StringValue(iResp.Role.RoleId)
+		return &IAMRoleResponse{}, err
 	}
 
 	//Verify tags
@@ -156,7 +131,57 @@ func (i *IAM) CreateRole(ctx context.Context, req IAMRoleRequest) (*IAMRoleRespo
 		return &IAMRoleResponse{}, err
 	}
 
-	return resp, nil
+	return role, nil
+}
+
+// GetOrCreateRole will try to create a new IAM Role in AWS. If it exists already, it will
+// use that role. In either case we return back an IAMRoleResponse{} object.
+func (i *IAM) GetOrCreateRole(ctx context.Context, req IAMRoleRequest) (*IAMRoleResponse, error) {
+	log := log.Logger(ctx, "awsapi", "iam", "GetOrCreateRole")
+	log = log.WithValues("roleName", req.Name)
+
+	// First things first - prep our CreateRoleInput object. If the validation fails, then lets bail quickly.
+	input := &iam.CreateRoleInput{
+		AssumeRolePolicyDocument: aws.String(req.TrustPolicy),
+		RoleName:                 aws.String(req.Name),
+		Description:              aws.String(req.Description),
+		MaxSessionDuration:       aws.Int64(req.SessionDuration),
+		PermissionsBoundary:      aws.String(req.ManagedPermissionBoundaryPolicy),
+	}
+	if err := input.Validate(); err != nil {
+		log.Error(err, "input validation failed")
+		return nil, err
+	}
+
+	// Try getting the role. If the role already exists, just return it.
+	getResp, err := i.GetRole(ctx, req)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case iam.ErrCodeNoSuchEntityException:
+				fallthrough
+			default:
+				log.Error(err, aerr.Error())
+				return nil, err
+			}
+		}
+	}
+	if getResp != nil {
+		return NewIAMRoleResponseFromGetRole(*getResp), nil
+	}
+
+	// If the role already exists - we'll figure that out based on the error that is returned by AWS.
+	log.V(1).Info("Initiating api call")
+	createResp, err := i.CreateRole(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if createResp != nil {
+		return NewIAMRoleResponseFromCreateRole(*createResp), nil
+	}
+
+	// if we got here, something really strange happened.. we got no errors, but also no responses?
+	return nil, nil
 }
 
 //VerifyTags function verifies the tags attached to the role
@@ -409,7 +434,7 @@ func (i *IAM) AttachInlineRolePolicy(ctx context.Context, req IAMRoleRequest) (*
 func (i *IAM) GetRole(ctx context.Context, req IAMRoleRequest) (*iam.GetRoleOutput, error) {
 	log := log.Logger(ctx, "awsapi", "iam", "GetRole")
 	log = log.WithValues("roleName", req.Name)
-	log.V(1).Info("Initiating api call")
+
 	// First get the iam role policy on the AWS IAM side
 	input := &iam.GetRoleInput{
 		RoleName: aws.String(req.Name),
@@ -421,6 +446,7 @@ func (i *IAM) GetRole(ctx context.Context, req IAMRoleRequest) (*iam.GetRoleOutp
 		return nil, err
 	}
 
+	log.V(1).Info("Initiating api call")
 	resp, err := i.Client.GetRole(input)
 
 	if err != nil {
@@ -438,6 +464,52 @@ func (i *IAM) GetRole(ctx context.Context, req IAMRoleRequest) (*iam.GetRoleOutp
 		return nil, err
 	}
 	log.V(1).Info("Successfully able to get the role")
+
+	return resp, nil
+}
+
+// CreateRole will try to create an IAM Role, or return back Nil if it does not exist
+func (i *IAM) CreateRole(ctx context.Context, req IAMRoleRequest) (*iam.CreateRoleOutput, error) {
+	log := log.Logger(ctx, "awsapi", "iam", "CreateRole")
+	log = log.WithValues("roleName", req.Name)
+
+	input := &iam.CreateRoleInput{
+		AssumeRolePolicyDocument: aws.String(req.TrustPolicy),
+		RoleName:                 aws.String(req.Name),
+		Description:              aws.String(req.Description),
+		MaxSessionDuration:       aws.Int64(req.SessionDuration),
+		PermissionsBoundary:      aws.String(req.ManagedPermissionBoundaryPolicy),
+	}
+
+	if err := input.Validate(); err != nil {
+		log.Error(err, "input validation failed")
+		return nil, err
+	}
+
+	// If the role already exists - we'll figure that out based on the error that is returned by AWS.
+	log.V(1).Info("Initiating api call")
+	resp, err := i.Client.CreateRole(input)
+
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			// Update the role to the latest spec if it is existed already
+			case iam.ErrCodeEntityAlreadyExistsException:
+				log.Info(iam.ErrCodeEntityAlreadyExistsException)
+			case iam.ErrCodeLimitExceededException:
+				log.Error(err, iam.ErrCodeLimitExceededException)
+			case iam.ErrCodeNoSuchEntityException:
+				log.Error(err, iam.ErrCodeNoSuchEntityException)
+			case iam.ErrCodeServiceFailureException:
+				log.Error(err, iam.ErrCodeServiceFailureException)
+			default:
+				log.Error(err, aerr.Error())
+			}
+		}
+
+		return nil, err
+	}
+	log.V(1).Info("Successfully created the role")
 
 	return resp, nil
 }
