@@ -1,16 +1,12 @@
 package k8s
 
+//go:generate mockgen -destination=mocks/mock_clientiface.go -package=mock_k8s sigs.k8s.io/controller-runtime/pkg/client Client
+
 import (
 	"context"
 	"fmt"
 	"github.com/keikoproj/iam-manager/pkg/log"
-	"k8s.io/api/core/v1"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
-	"os"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"time"
-
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -19,14 +15,17 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog"
+	"os"
+	"time"
 )
 
 type Client struct {
-	cl  kubernetes.Interface
+	Cl  kubernetes.Interface
 	dCl dynamic.Interface
-	rCl client.Client
 }
 
 //NewK8sClient gets the new k8s go client
@@ -49,7 +48,7 @@ func NewK8sClient() (*Client, error) {
 	}
 
 	cl := &Client{
-		cl:  client,
+		Cl:  client,
 		dCl: dClient,
 	}
 	return cl, nil
@@ -75,28 +74,22 @@ func NewK8sClientDoOrDie() *Client {
 	}
 
 	cl := &Client{
-		cl:  client,
+		Cl:  client,
 		dCl: dClient,
 	}
 	return cl
 }
 
-//NewK8sManagerClient func will be used in future and all others should migrate to this
-func NewK8sManagerClient(client client.Client) *Client {
-	cl := &Client{
-		rCl: client,
-	}
-	return cl
-
-}
-
-//Iface defines required functions to be implemented by receivers
+// Iface defines required functions to be implemented by receivers
 type Iface interface {
 	IamrolesCount(ctx context.Context, ns string)
 	GetConfigMap(ctx context.Context, ns string, name string) *v1.ConfigMap
 	SetUpEventHandler(ctx context.Context) record.EventRecorder
 	GetNamespace(ctx context.Context, ns string) *v1.Namespace
 	CreateOrUpdateServiceAccount(ctx context.Context, saName string, ns string) error
+	EnsureServiceAccount(ctx context.Context, req ServiceAccountRequest) error
+	PatchServiceAccountAnnotation(ctx context.Context, saName string, ns string, annotation string, value string) error
+	GetServiceAccount(ctx context.Context, saName string, ns string) (*v1.ServiceAccount, error)
 }
 
 //IamrolesCount function lists the "Iamrole" for a provided namespace
@@ -123,7 +116,7 @@ func (c *Client) GetConfigMap(ctx context.Context, ns string, name string) *v1.C
 	log := log.Logger(ctx, "k8s", "client", "GetConfigMap")
 	log.WithValues("namespace", ns)
 	log.Info("Retrieving config map")
-	res, err := c.cl.CoreV1().ConfigMaps(ns).Get(name, metav1.GetOptions{})
+	res, err := c.Cl.CoreV1().ConfigMaps(ns).Get(name, metav1.GetOptions{})
 	if err != nil {
 		log.Error(err, "unable to get config map")
 		panic(err)
@@ -138,7 +131,7 @@ func (c *Client) GetNamespace(ctx context.Context, ns string) (*v1.Namespace, er
 	log.WithValues("namespace", ns)
 	log.Info("Retrieving Namespace")
 	resp := &v1.Namespace{}
-	resp, err := c.cl.CoreV1().Namespaces().Get(ns, metav1.GetOptions{})
+	resp, err := c.Cl.CoreV1().Namespaces().Get(ns, metav1.GetOptions{})
 	if err != nil {
 		log.Error(err, "unable to get the namespace details")
 		return nil, err
@@ -152,7 +145,7 @@ func (c *Client) GetNamespace(ctx context.Context, ns string) (*v1.Namespace, er
 }
 
 func (c *Client) ClientInterface() kubernetes.Interface {
-	return c.cl
+	return c.Cl
 }
 
 // GetConfigMapInformer returns shared informer for given config map
@@ -180,7 +173,7 @@ func (c *Client) SetUpEventHandler(ctx context.Context) record.EventRecorder {
 	//For more info refer: https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/job/job_controller.go
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(klog.Infof)
-	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: c.cl.CoreV1().Events("")})
+	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: c.Cl.CoreV1().Events("")})
 	log.V(1).Info("Successfully added event broadcaster")
 	return eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "iam-manager"})
 }
